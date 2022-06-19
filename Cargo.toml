@@ -1,0 +1,17 @@
+[package]
+name = "api"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.5.7" }
+tokio = { version = "1.19.2", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1.0.79"
+tower-http = { version = "0.3.0", features = ["cors"] }
+axum-macros = "0.2.2"
+async-graphql = { version = "3.0", features = ["chrono"] }
+sqlx = { version = "0.5.0", features = [ "mysql", "runtime-tokio-rustls", "time", "chrono" ] }
+anyhow = "1.0"
+chrono = "0.4"
