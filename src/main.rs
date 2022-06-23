@@ -2,11 +2,11 @@ mod resolvers;
 
 use axum::{
     extract::Extension,
-    http::{HeaderValue, Method},
+    http::{HeaderValue, Method, StatusCode},
     response::{Html, IntoResponse},
     routing::get,
     Json, 
-    Router,
+    Router, handler::Handler,
 };
 use async_graphql::{
     http::{playground_source, GraphQLPlaygroundConfig},
@@ -30,6 +30,10 @@ async fn graphql_playground() -> impl IntoResponse {
     Html(playground_source(GraphQLPlaygroundConfig::new("/")))
 }
 
+async fn notfound_handler() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "not found")
+}
+
 #[tokio::main]
 async fn main() {
     let server = async {
@@ -44,6 +48,8 @@ async fn main() {
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS]),
         )
         .layer(Extension(schema));
+
+        let app = app.fallback(notfound_handler.into_service());
     
         let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
         axum::Server::bind(&addr)
