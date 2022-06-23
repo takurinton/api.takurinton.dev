@@ -1,11 +1,13 @@
 use chrono::{DateTime, Utc};
 use sqlx::{mysql::MySqlPool};
-use std::env;
+use std::{env};
 
 use async_graphql::{
   Object,
   Context,
   SimpleObject,
+  ErrorExtensions, 
+  FieldError, 
 };
 
 #[derive(SimpleObject)]
@@ -43,6 +45,28 @@ pub struct Posts {
 }
 
 pub struct QueryRoot;
+
+#[derive(Debug, Error)]
+pub enum BlogError {
+    #[error("Could not find resource")]
+    NotFound,
+
+    #[error("ServerError")]
+    ServerError(String),
+
+    #[error("No Extensions")]
+    ErrorWithoutExtensions,
+}
+
+impl ErrorExtensions for BlogError {
+  fn extend(&self) -> FieldError {
+      self.extend_with(|err, e| match err {
+        BlogError::NotFound => e.set("code", "NOT_FOUND"),
+        BlogError::ServerError(reason) => e.set("reason", reason.to_string()),
+        BlogError::ErrorWithoutExtensions => {}
+      })
+  }
+}
 
 /**
  * resolvers

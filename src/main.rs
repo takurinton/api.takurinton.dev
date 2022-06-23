@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate thiserror;
+
 mod resolvers;
 
 use axum::{
@@ -50,7 +53,7 @@ async fn main() {
         .layer(Extension(schema));
 
         let app = app.fallback(notfound_handler.into_service());
-    
+
         let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
         axum::Server::bind(&addr)
             .serve(app.into_make_service())

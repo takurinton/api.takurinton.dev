@@ -15,3 +15,4 @@ async-graphql = { version = "3.0", features = ["chrono"] }
 sqlx = { version = "0.5.0", features = [ "mysql", "runtime-tokio-rustls", "time", "chrono" ] }
 anyhow = "1.0"
 chrono = "0.4"
+thiserror = "1.0"
