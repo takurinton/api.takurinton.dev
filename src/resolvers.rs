@@ -7,7 +7,7 @@ use async_graphql::{
   Context,
   SimpleObject,
   ErrorExtensions, 
-  FieldError, 
+  FieldError, FieldResult, ResultExt, 
 };
 
 #[derive(SimpleObject)]
@@ -86,7 +86,7 @@ impl QueryRoot {
       _ctx: &Context<'_>,
       #[graphql(desc = "id of the post")] id: i32,
   ) -> Post {
-    let post = get_post(id).await.unwrap();
+    let post = get_post(id).await;
     post
   }
 
@@ -110,6 +110,34 @@ impl QueryRoot {
           page_size,
           results,
       }
+  }
+
+  async fn extend(&self) -> FieldResult<i32> {
+    Err(BlogError::NotFound.extend())
+  }
+
+  async fn extend_result(&self) -> FieldResult<Post> {
+      Err(BlogError::NotFound).extend()
+  }
+
+  async fn more_extensions(&self) -> FieldResult<String> {
+      Err(BlogError::NotFound.extend_with(|_e, e| e.set("reason", "my reason")))
+  }
+
+  async fn more_extensions_on_result(&self) -> FieldResult<String> {
+      Err(BlogError::NotFound).extend_err(|_e, e| e.set("reason", "my reason"))
+  }
+
+  async fn chainable_extensions(&self) -> FieldResult<String> {
+      let err = BlogError::NotFound
+          .extend_with(|_, e| e.set("ext1", 1))
+          .extend_with(|_, e| e.set("ext2", 2))
+          .extend_with(|_, e| e.set("ext3", 3));
+      Err(err)
+  }
+
+  async fn overwrite(&self) -> FieldResult<String> {
+      Err(BlogError::NotFound.extend_with(|_, e| e.set("code", "overwritten")))
   }
 }
 
@@ -136,7 +164,7 @@ SELECT count(*) as count FROM blogapp_post where open = true
 }
 
 // get post by id
-pub async fn get_post(id: i32) -> Option<Post> {
+pub async fn get_post(id: i32) -> Post {
   let uri = &env::var("DATABASE_URL").unwrap();
   let pool = MySqlPool::connect(uri).await.unwrap();
   let post = sqlx::query_as::<_, Post>(
@@ -161,20 +189,17 @@ pub async fn get_post(id: i32) -> Option<Post> {
   .bind(id)
   .fetch_one(&pool)
   .await;
-
+  
   match post {
-    Ok(post) => Some(post),
-    // sqlx::Error::RowNotFound の時はエラーにせずに空の値を返す
-    Err(_) => Some(
-      Post {
-        id: 0,
-        title: "".to_string(),
-        category: None,
-        contents: None,
-        pub_date: Utc::now(),
-        open: 0,
-      }
-    ),
+    Ok(post) => post,
+    Err(_) => Post {
+      id: 0,
+      title: "".to_string(),
+      category: None,
+      contents: None,
+      pub_date: Utc::now(),
+      open: 0,
+    },
   }
 }
 
