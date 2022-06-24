@@ -85,9 +85,12 @@ impl QueryRoot {
       &self,
       _ctx: &Context<'_>,
       #[graphql(desc = "id of the post")] id: i32,
-  ) -> Post {
+  ) -> FieldResult<Post> {
     let post = get_post(id).await;
-    post
+    match post.id {
+      0 => Err(BlogError::NotFound.into()),
+      _ => Ok(post),
+    }
   }
 
   #[allow(non_snake_case)]
@@ -199,7 +202,7 @@ pub async fn get_post(id: i32) -> Post {
       contents: None,
       pub_date: Utc::now(),
       open: 0,
-    },
+    }
   }
 }
 
