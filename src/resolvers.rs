@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use sqlx::{mysql::MySqlPool};
-use std::{env};
+use std::env;
 
 use async_graphql::{
   Object,
@@ -48,8 +48,11 @@ pub struct QueryRoot;
 
 #[derive(Debug, Error)]
 pub enum BlogError {
-    #[error("Could not find resource")]
-    NotFound,
+    #[error("投稿が存在しません")]
+    NotFoundPost,
+
+    #[error("投稿が存在しません")]
+    NotFoundPosts,
 
     #[error("ServerError")]
     ServerError(String),
@@ -61,7 +64,8 @@ pub enum BlogError {
 impl ErrorExtensions for BlogError {
   fn extend(&self) -> FieldError {
       self.extend_with(|err, e| match err {
-        BlogError::NotFound => e.set("code", "NOT_FOUND"),
+        BlogError::NotFoundPost => e.set("code", "NOT_FOUND"),
+        BlogError::NotFoundPosts => e.set("code", "NOT_FOUND"),
         BlogError::ServerError(reason) => e.set("reason", reason.to_string()),
         BlogError::ErrorWithoutExtensions => {}
       })
@@ -88,7 +92,7 @@ impl QueryRoot {
   ) -> FieldResult<Post> {
     let post = get_post(id).await;
     match post.id {
-      0 => Err(BlogError::NotFound.into()),
+      0 => return Err(BlogError::NotFoundPost).extend(),
       _ => Ok(post),
     }
   }
@@ -99,48 +103,42 @@ impl QueryRoot {
       _ctx: &Context<'_>,
       #[graphql(desc = "current page")] page: i32, 
       #[graphql(desc = "selected category")] category: String
-  ) -> Posts {
+  ) -> FieldResult<Posts> {
     let convertPage = if page == 0 { 1 } else { page };
     let categoryForResult = category.clone();
-    let results = get_posts(page, category).await.unwrap();
-    let count = count().await.unwrap();
-    let page_size = (count / 5) + 1;
-      Posts {
-          current: convertPage,
-          next: if convertPage == page_size { Some(page_size) } else { Some(convertPage + 1) },
-          prev: if convertPage == 0 { Some(0) } else { Some(convertPage - 1) },
-          category: categoryForResult,
-          page_size,
-          results,
-      }
-  }
+    let count =  match count().await {
+      0 => return Err(BlogError::NotFoundPosts).extend(),
+      c => c,
+    };
 
-  async fn extend(&self) -> FieldResult<i32> {
-    Err(BlogError::NotFound.extend())
-  }
+    let results = get_posts(page, category).await;
+    // let results = match posts {
+    //   [] => Err(BlogError::NotFoundPosts.into()),
+    //   posts => Ok(posts),
+    // };
+
+    let page_size = (count / 5) + 1;
+    let posts = Posts {
+        current: convertPage,
+        next: if convertPage == page_size { Some(page_size) } else { Some(convertPage + 1) },
+        prev: if convertPage == 0 { Some(0) } else { Some(convertPage - 1) },
+        category: categoryForResult,
+        page_size,
+        results,
+    };
+    Ok(posts)
+}
 
   async fn extend_result(&self) -> FieldResult<Post> {
-      Err(BlogError::NotFound).extend()
+      Err(BlogError::NotFoundPost).extend()
   }
 
-  async fn more_extensions(&self) -> FieldResult<String> {
-      Err(BlogError::NotFound.extend_with(|_e, e| e.set("reason", "my reason")))
+  async fn extend_results(&self) -> FieldResult<Post> {
+    Err(BlogError::NotFoundPosts).extend()
   }
 
-  async fn more_extensions_on_result(&self) -> FieldResult<String> {
-      Err(BlogError::NotFound).extend_err(|_e, e| e.set("reason", "my reason"))
-  }
-
-  async fn chainable_extensions(&self) -> FieldResult<String> {
-      let err = BlogError::NotFound
-          .extend_with(|_, e| e.set("ext1", 1))
-          .extend_with(|_, e| e.set("ext2", 2))
-          .extend_with(|_, e| e.set("ext3", 3));
-      Err(err)
-  }
-
-  async fn overwrite(&self) -> FieldResult<String> {
-      Err(BlogError::NotFound.extend_with(|_, e| e.set("code", "overwritten")))
+  async fn extend_server_error(&self) -> FieldResult<Post> {
+    Err(BlogError::ServerError("ServerError".to_string())).extend()
   }
 }
 
@@ -148,8 +146,27 @@ impl QueryRoot {
  * database
  */
 
+enum DatabaseError {
+  ServerError(String),
+  NotFound,
+}
+
+async fn pool () -> Result<MySqlPool, DatabaseError> {
+  let url = match env::var("DATABASE_URL") {
+    Ok(url) => url,
+    Err(_) => {
+      return Err(DatabaseError::ServerError("DATABASE_URL is not set".to_string()));
+    }
+  };
+  let pool = MySqlPool::connect(&url).await;
+  match pool {
+    Ok(pool) => Ok(pool),
+    Err(e) => return Err(DatabaseError::ServerError(e.to_string())),
+  }
+}
+
 // count all posts
-pub async fn count() -> Option<i32> {
+pub async fn count() -> i32 {
   let uri = &env::var("DATABASE_URL").unwrap();
   let pool = MySqlPool::connect(uri).await.unwrap();
   let count_all = sqlx::query_as::<_, Count>(
@@ -160,16 +177,20 @@ SELECT count(*) as count FROM blogapp_post where open = true
   .fetch_one(&pool)
   .await;
 
+  // open = true の投稿なかったら勝手に0になるから無理にハンドリングする必要ないけど一応
   match count_all {
-    Ok(count) => Some(count.count as i32),
-    Err(_) => None,
-  }      
+    Ok(count) => count.count as i32,
+    Err(_) => 0,
+  }
 }
 
 // get post by id
-pub async fn get_post(id: i32) -> Post {
-  let uri = &env::var("DATABASE_URL").unwrap();
-  let pool = MySqlPool::connect(uri).await.unwrap();
+pub async fn get_post(id: i32) -> Result<Post, DatabaseError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let post = sqlx::query_as::<_, Post>(
     r#"
     SELECT 
@@ -193,22 +214,19 @@ pub async fn get_post(id: i32) -> Post {
   .fetch_one(&pool)
   .await;
   
-  match post {
-    Ok(post) => post,
-    Err(_) => Post {
-      id: 0,
-      title: "".to_string(),
-      category: None,
-      contents: None,
-      pub_date: Utc::now(),
-      open: 0,
-    }
+  match post.unwrap().id {
+    0 => Err(DatabaseError::NotFound),
+    _ => Ok(post.unwrap()),
   }
 }
 
 // get posts by page and category
-pub async fn get_posts(page: i32, category: String) -> anyhow::Result<Vec<Post>> {
-  let pool = MySqlPool::connect(&env::var("DATABASE_URL")?).await?;
+pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, DatabaseError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let offset = if page == 0 { 0 } else { 5 * (page - 1) };
   let category_query = if category == "" {
     format!("{}", "")
@@ -247,7 +265,10 @@ pub async fn get_posts(page: i32, category: String) -> anyhow::Result<Vec<Post>>
   )
   .bind(offset)
   .fetch_all(&pool)
-  .await?;
+  .await;
 
-  Ok(posts)
+  match posts {
+    Ok(posts) => Ok(posts),
+    Err(_) => Err(DatabaseError::NotFound),
+  }
 }
