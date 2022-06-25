@@ -6,6 +6,10 @@ use async_graphql::{
   Object,
   Context,
   SimpleObject,
+  ErrorExtensions, 
+  FieldError, 
+  FieldResult,
+  ResultExt, 
 };
 
 #[derive(SimpleObject)]
@@ -44,6 +48,29 @@ pub struct Posts {
 
 pub struct QueryRoot;
 
+#[derive(Debug, Error)]
+pub enum BlogError {
+    #[error("投稿が存在しません")]
+    NotFoundPost,
+
+    #[error("投稿が存在しません")]
+    NotFoundPosts,
+
+    #[error("ServerError")]
+    ServerError(String),
+
+}
+
+impl ErrorExtensions for BlogError {
+  fn extend(&self) -> FieldError {
+      self.extend_with(|err, e| match err {
+        BlogError::NotFoundPost => e.set("code", "NOT_FOUND"),
+        BlogError::NotFoundPosts => e.set("code", "NOT_FOUND"),
+        BlogError::ServerError(reason) => e.set("reason", reason.to_string()),
+      })
+  }
+}
+
 /**
  * resolvers
  */
@@ -61,9 +88,22 @@ impl QueryRoot {
       &self,
       _ctx: &Context<'_>,
       #[graphql(desc = "id of the post")] id: i32,
-  ) -> Post {
-    let post = get_post(id).await.unwrap();
-    post
+  ) -> FieldResult<Post> {
+    let post = get_post(id).await;
+    match post {
+      Ok(post) => Ok(post),
+      Err(err) => Err(
+        match err {
+          BlogError::NotFoundPost => FieldError::new(
+            "投稿が存在しません".to_string(),
+          ),
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
+    }
   }
 
   #[allow(non_snake_case)]
@@ -72,20 +112,74 @@ impl QueryRoot {
       _ctx: &Context<'_>,
       #[graphql(desc = "current page")] page: i32, 
       #[graphql(desc = "selected category")] category: String
-  ) -> Posts {
+  ) -> FieldResult<Posts> {
     let convertPage = if page == 0 { 1 } else { page };
     let categoryForResult = category.clone();
-    let results = get_posts(page, category).await.unwrap();
-    let count = count().await.unwrap();
+    let count =  match count().await {
+      Ok(count) => match count {
+        // 0件だったら not found,　
+        // fetch_one を実行した場合 count(*) が 0件だったらエラーにならないので手動で not found を設定
+        0 => return Err(BlogError::NotFoundPosts.into()),
+        _ => count,
+      },
+      Err(err) => return Err(
+        match err {
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
+    };
+
+    let posts = get_posts(page, category).await;
+    let results = match posts {
+      Ok(posts) => posts,
+      // 投稿がなかったら　　count　の方で弾かれるので、実質ここのエラーはほぼ呼ばれない
+      // count のコネクションがはうまくいき、ここでのコネクションがうまくいかなかった時にエラーになる想定
+      Err(err) => return Err(
+        match err {
+          BlogError::NotFoundPosts => FieldError::new(
+            "投稿がありません".to_string(),
+          ),
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
+    };
+
     let page_size = (count / 5) + 1;
-      Posts {
-          current: convertPage,
-          next: if convertPage == page_size { Some(page_size) } else { Some(convertPage + 1) },
-          prev: if convertPage == 0 { Some(0) } else { Some(convertPage - 1) },
-          category: categoryForResult,
-          page_size,
-          results,
-      }
+    
+    match convertPage > page_size {
+      true => return Err(BlogError::NotFoundPosts.into()),
+      _ => (),
+    }
+
+    let next = if convertPage == page_size { Some(page_size) } else { Some(convertPage + 1) };
+    let prev = if convertPage == 0 { Some(0) } else { Some(convertPage - 1) };
+
+    Ok(Posts {
+      current: convertPage,
+      next,
+      prev,
+      category: categoryForResult,
+      page_size,
+      results,
+    })
+}
+
+  async fn extend_result(&self) -> FieldResult<Post> {
+      Err(BlogError::NotFoundPost).extend()
+  }
+
+  async fn extend_results(&self) -> FieldResult<Post> {
+    Err(BlogError::NotFoundPosts).extend()
+  }
+
+  async fn extend_server_error(&self) -> FieldResult<Post> {
+    Err(BlogError::ServerError("ServerError".to_string())).extend()
   }
 }
 
@@ -93,10 +187,27 @@ impl QueryRoot {
  * database
  */
 
+async fn pool () -> Result<MySqlPool, BlogError> {
+  let url = match env::var("DATABASE_URL") {
+    Ok(url) => url,
+    Err(_) => {
+      return Err(BlogError::ServerError("DATABASE_URL is not set".to_string()));
+    }
+  };
+  let pool = MySqlPool::connect(&url).await;
+  match pool {
+    Ok(pool) => Ok(pool),
+    Err(e) => Err(BlogError::ServerError(e.to_string())),
+  }
+}
+
 // count all posts
-pub async fn count() -> Option<i32> {
-  let uri = &env::var("DATABASE_URL").unwrap();
-  let pool = MySqlPool::connect(uri).await.unwrap();
+pub async fn count() -> Result<i32, BlogError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let count_all = sqlx::query_as::<_, Count>(
     r#"
 SELECT count(*) as count FROM blogapp_post where open = true
@@ -106,15 +217,19 @@ SELECT count(*) as count FROM blogapp_post where open = true
   .await;
 
   match count_all {
-    Ok(count) => Some(count.count as i32),
-    Err(_) => None,
-  }      
+    Ok(count_all) => Ok(count_all.count as i32),
+    // 0件だったら普通に0が返るので基本的にはここには到達しない前提
+    Err(_) => Err(BlogError::NotFoundPosts),
+  }
 }
 
 // get post by id
-pub async fn get_post(id: i32) -> Option<Post> {
-  let uri = &env::var("DATABASE_URL").unwrap();
-  let pool = MySqlPool::connect(uri).await.unwrap();
+pub async fn get_post(id: i32) -> Result<Post, BlogError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let post = sqlx::query_as::<_, Post>(
     r#"
     SELECT 
@@ -137,26 +252,20 @@ pub async fn get_post(id: i32) -> Option<Post> {
   .bind(id)
   .fetch_one(&pool)
   .await;
-
+  
   match post {
-    Ok(post) => Some(post),
-    // sqlx::Error::RowNotFound の時はエラーにせずに空の値を返す
-    Err(_) => Some(
-      Post {
-        id: 0,
-        title: "".to_string(),
-        category: None,
-        contents: None,
-        pub_date: Utc::now(),
-        open: 0,
-      }
-    ),
+    Ok(post) => Ok(post),
+    Err(_) => Err(BlogError::NotFoundPost),
   }
 }
 
 // get posts by page and category
-pub async fn get_posts(page: i32, category: String) -> anyhow::Result<Vec<Post>> {
-  let pool = MySqlPool::connect(&env::var("DATABASE_URL")?).await?;
+pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, BlogError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let offset = if page == 0 { 0 } else { 5 * (page - 1) };
   let category_query = if category == "" {
     format!("{}", "")
@@ -195,7 +304,10 @@ pub async fn get_posts(page: i32, category: String) -> anyhow::Result<Vec<Post>>
   )
   .bind(offset)
   .fetch_all(&pool)
-  .await?;
+  .await;
 
-  Ok(posts)
+  match posts {
+    Ok(posts) => Ok(posts),
+    Err(_) => Err(BlogError::NotFoundPosts),
+  }
 }
