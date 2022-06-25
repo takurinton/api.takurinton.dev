@@ -151,11 +151,7 @@ impl QueryRoot {
     };
 
     let page_size = (count / 5) + 1;
-    match page_size {
-      0 => return Err(BlogError::NotFoundPosts.into()),
-      _ => (),
-    }
-
+    
     match convertPage > page_size {
       true => return Err(BlogError::NotFoundPosts.into()),
       _ => (),
