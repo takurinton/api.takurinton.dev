@@ -7,7 +7,9 @@ use async_graphql::{
   Context,
   SimpleObject,
   ErrorExtensions, 
-  FieldError, FieldResult, ResultExt, ServerError, 
+  FieldError, 
+  FieldResult,
+  ResultExt, 
 };
 
 #[derive(SimpleObject)]
