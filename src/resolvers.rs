@@ -7,7 +7,7 @@ use async_graphql::{
   Context,
   SimpleObject,
   ErrorExtensions, 
-  FieldError, FieldResult, ResultExt, 
+  FieldError, FieldResult, ResultExt, ServerError, 
 };
 
 #[derive(SimpleObject)]
@@ -57,8 +57,6 @@ pub enum BlogError {
     #[error("ServerError")]
     ServerError(String),
 
-    #[error("No Extensions")]
-    ErrorWithoutExtensions,
 }
 
 impl ErrorExtensions for BlogError {
@@ -67,7 +65,6 @@ impl ErrorExtensions for BlogError {
         BlogError::NotFoundPost => e.set("code", "NOT_FOUND"),
         BlogError::NotFoundPosts => e.set("code", "NOT_FOUND"),
         BlogError::ServerError(reason) => e.set("reason", reason.to_string()),
-        BlogError::ErrorWithoutExtensions => {}
       })
   }
 }
@@ -93,7 +90,17 @@ impl QueryRoot {
     let post = get_post(id).await;
     match post {
       Ok(post) => Ok(post),
-      Err(err) => Err(err.into()),
+      Err(err) => Err(
+        match err {
+          BlogError::NotFoundPost => FieldError::new(
+            "投稿が存在しません".to_string(),
+          ),
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
     }
   }
 
@@ -107,14 +114,38 @@ impl QueryRoot {
     let convertPage = if page == 0 { 1 } else { page };
     let categoryForResult = category.clone();
     let count =  match count().await {
-      Ok(count) => count,
-      Err(err) => return Err(err.into()),
+      Ok(count) => match count {
+        // 0件だったら not found,　
+        // fetch_one を実行した場合 count(*) が 0件だったらエラーにならないので手動で not found を設定
+        0 => return Err(BlogError::NotFoundPosts.into()),
+        _ => count,
+      },
+      Err(err) => return Err(
+        match err {
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
     };
 
     let posts = get_posts(page, category).await;
     let results = match posts {
       Ok(posts) => posts,
-      Err(err) => return Err(err.into()),
+      // 投稿がなかったら　　count　の方で弾かれるので、実質ここのエラーはほぼ呼ばれない
+      // count のコネクションがはうまくいき、ここでのコネクションがうまくいかなかった時にエラーになる想定
+      Err(err) => return Err(
+        match err {
+          BlogError::NotFoundPosts => FieldError::new(
+            "まだ投稿がありません".to_string(),
+          ),
+          BlogError::ServerError(message) => FieldError::new(
+            message.to_string(),
+          ),
+          _ => FieldError::new("unknown error".to_string()),
+        },
+      ),
     };
 
     let page_size = (count / 5) + 1;
@@ -175,10 +206,10 @@ SELECT count(*) as count FROM blogapp_post where open = true
   .fetch_one(&pool)
   .await;
 
-  // どっちにしても0を返したい
   match count_all {
     Ok(count_all) => Ok(count_all.count as i32),
-    Err(_) => Ok(0),
+    // 0件だったら普通に0が返るので基本的にはここには到達しない前提
+    Err(_) => Err(BlogError::NotFoundPosts),
   }
 }
 
