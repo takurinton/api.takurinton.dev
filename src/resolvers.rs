@@ -107,15 +107,15 @@ impl QueryRoot {
     let convertPage = if page == 0 { 1 } else { page };
     let categoryForResult = category.clone();
     let count =  match count().await {
-      0 => return Err(BlogError::NotFoundPosts).extend(),
-      c => c,
+      Ok(count) => count,
+      Err(err) => return Err(err.into()),
     };
 
-    let results = get_posts(page, category).await;
-    // let results = match posts {
-    //   [] => Err(BlogError::NotFoundPosts.into()),
-    //   posts => Ok(posts),
-    // };
+    let posts = get_posts(page, category).await;
+    let results = match posts {
+      Ok(posts) => posts,
+      Err(err) => return Err(err.into()),
+    };
 
     let page_size = (count / 5) + 1;
     let posts = Posts {
@@ -146,30 +146,25 @@ impl QueryRoot {
  * database
  */
 
-enum DatabaseError {
-  ServerError(String),
-  NotFound,
-}
-
-async fn pool () -> Result<MySqlPool, DatabaseError> {
+async fn pool () -> Result<MySqlPool, BlogError> {
   let url = match env::var("DATABASE_URL") {
     Ok(url) => url,
     Err(_) => {
-      return Err(DatabaseError::ServerError("DATABASE_URL is not set".to_string()));
+      return Err(BlogError::ServerError("DATABASE_URL is not set".to_string()));
     }
   };
   let pool = MySqlPool::connect(&url).await;
   match pool {
     Ok(pool) => Ok(pool),
-    Err(e) => Err(DatabaseError::ServerError(e.to_string())),
+    Err(e) => Err(BlogError::ServerError(e.to_string())),
   }
 }
 
 // count all posts
-pub async fn count() -> Result<i32, DatabaseError> {
+pub async fn count() -> Result<i32, BlogError> {
   let pool = match pool().await {
     Ok(pool) => pool,
-    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
   };
 
   let count_all = sqlx::query_as::<_, Count>(
@@ -188,10 +183,10 @@ SELECT count(*) as count FROM blogapp_post where open = true
 }
 
 // get post by id
-pub async fn get_post(id: i32) -> Result<Post, DatabaseError> {
+pub async fn get_post(id: i32) -> Result<Post, BlogError> {
   let pool = match pool().await {
     Ok(pool) => pool,
-    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
   };
 
   let post = sqlx::query_as::<_, Post>(
@@ -219,15 +214,15 @@ pub async fn get_post(id: i32) -> Result<Post, DatabaseError> {
   
   match post {
     Ok(post) => Ok(post),
-    Err(_) => Err(DatabaseError::NotFound),
+    Err(_) => Err(BlogError::NotFoundPost),
   }
 }
 
 // get posts by page and category
-pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, DatabaseError> {
+pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, BlogError> {
   let pool = match pool().await {
     Ok(pool) => pool,
-    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+    Err(_) => return Err(BlogError::ServerError("Database Error: connection failed".to_string())),
   };
 
   let offset = if page == 0 { 0 } else { 5 * (page - 1) };
@@ -272,6 +267,6 @@ pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, Databas
 
   match posts {
     Ok(posts) => Ok(posts),
-    Err(_) => Err(DatabaseError::NotFound),
+    Err(_) => Err(BlogError::NotFoundPosts),
   }
 }
