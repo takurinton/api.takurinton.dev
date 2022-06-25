@@ -113,7 +113,7 @@ impl QueryRoot {
       #[graphql(desc = "current page")] page: i32, 
       #[graphql(desc = "selected category")] category: String
   ) -> FieldResult<Posts> {
-    let convertPage = if page == 0 { 1 } else { page };
+    let page = if page == 0 { 1 } else { page };
     let categoryForResult = category.clone();
     let count =  match count().await {
       Ok(count) => match count {
@@ -152,16 +152,16 @@ impl QueryRoot {
 
     let page_size = (count / 5) + 1;
     
-    match convertPage > page_size {
+    match page > page_size {
       true => return Err(BlogError::NotFoundPosts.into()),
       _ => (),
     }
 
-    let next = if convertPage == page_size { Some(page_size) } else { Some(convertPage + 1) };
-    let prev = if convertPage == 0 { Some(0) } else { Some(convertPage - 1) };
+    let next = if page == page_size { Some(page_size) } else { Some(page + 1) };
+    let prev = if page == 0 { Some(0) } else { Some(page - 1) };
 
     Ok(Posts {
-      current: convertPage,
+      current: page,
       next,
       prev,
       category: categoryForResult,
@@ -218,8 +218,7 @@ SELECT count(*) as count FROM blogapp_post where open = true
 
   match count_all {
     Ok(count_all) => Ok(count_all.count as i32),
-    // 0件だったら普通に0が返るので基本的にはここには到達しない前提
-    Err(_) => Err(BlogError::NotFoundPosts),
+    Err(_) => Err(BlogError::ServerError("unknown error".to_string())),
   }
 }
 
@@ -308,6 +307,8 @@ pub async fn get_posts(page: i32, category: String) -> Result<Vec<Post>, BlogErr
 
   match posts {
     Ok(posts) => Ok(posts),
-    Err(_) => Err(BlogError::NotFoundPosts),
+    // fetch_all は該当するレコードがなくてもエラーを吐かない
+    // つまりここで拾うべきは想定していない未知のエラー
+    Err(_) => Err(BlogError::ServerError("unknown error".to_string())),
   }
 }
