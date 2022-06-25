@@ -91,9 +91,9 @@ impl QueryRoot {
       #[graphql(desc = "id of the post")] id: i32,
   ) -> FieldResult<Post> {
     let post = get_post(id).await;
-    match post.id {
-      0 => return Err(BlogError::NotFoundPost).extend(),
-      _ => Ok(post),
+    match post {
+      Ok(post) => Ok(post),
+      Err(err) => Err(err.into()),
     }
   }
 
@@ -161,14 +161,17 @@ async fn pool () -> Result<MySqlPool, DatabaseError> {
   let pool = MySqlPool::connect(&url).await;
   match pool {
     Ok(pool) => Ok(pool),
-    Err(e) => return Err(DatabaseError::ServerError(e.to_string())),
+    Err(e) => Err(DatabaseError::ServerError(e.to_string())),
   }
 }
 
 // count all posts
-pub async fn count() -> i32 {
-  let uri = &env::var("DATABASE_URL").unwrap();
-  let pool = MySqlPool::connect(uri).await.unwrap();
+pub async fn count() -> Result<i32, DatabaseError> {
+  let pool = match pool().await {
+    Ok(pool) => pool,
+    Err(_) => return Err(DatabaseError::ServerError("Database Error: connection failed".to_string())),
+  };
+
   let count_all = sqlx::query_as::<_, Count>(
     r#"
 SELECT count(*) as count FROM blogapp_post where open = true
@@ -177,10 +180,10 @@ SELECT count(*) as count FROM blogapp_post where open = true
   .fetch_one(&pool)
   .await;
 
-  // open = true の投稿なかったら勝手に0になるから無理にハンドリングする必要ないけど一応
+  // どっちにしても0を返したい
   match count_all {
-    Ok(count) => count.count as i32,
-    Err(_) => 0,
+    Ok(count_all) => Ok(count_all.count as i32),
+    Err(_) => Ok(0),
   }
 }
 
@@ -214,9 +217,9 @@ pub async fn get_post(id: i32) -> Result<Post, DatabaseError> {
   .fetch_one(&pool)
   .await;
   
-  match post.unwrap().id {
-    0 => Err(DatabaseError::NotFound),
-    _ => Ok(post.unwrap()),
+  match post {
+    Ok(post) => Ok(post),
+    Err(_) => Err(DatabaseError::NotFound),
   }
 }
 
